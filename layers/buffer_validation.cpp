@@ -321,8 +321,33 @@ void CoreChecks::SetImageLayout(GLOBAL_CB_NODE *cb_node, const IMAGE_STATE *imag
     SetImageLayout(cb_node, image_state, image_subresource_range, layout);
 }
 
+static bool AreDescriptorLayoutsCompatible(VkImageLayout first_layout, VkImageLayout second_layout,
+                                           VkImageAspectFlags aspect_mask) {
+    // Descriptor accesses have relaxed layout matching rules for depth/stencil images, when the view only refers to a single
+    // aspect.
+    bool compatible = first_layout == second_layout;
+    if (!compatible) {
+        if (aspect_mask == VK_IMAGE_ASPECT_DEPTH_BIT) {
+            if (first_layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL) {
+                compatible = second_layout == VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL;
+            } else if (first_layout == VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL) {
+                compatible = second_layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+            }
+        } else if (aspect_mask == VK_IMAGE_ASPECT_STENCIL_BIT) {
+            if (first_layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL) {
+                compatible = second_layout == VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL;
+            } else if (first_layout == VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL) {
+                compatible = second_layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+            }
+        }
+    }
+
+	return compatible;
+}
+
 // Set image layout for all slices of an image view
-void CoreChecks::SetImageViewLayout(GLOBAL_CB_NODE *cb_node, IMAGE_VIEW_STATE *view_state, const VkImageLayout &layout) {
+void CoreChecks::SetImageViewLayout(GLOBAL_CB_NODE *cb_node, IMAGE_VIEW_STATE *view_state, const VkImageLayout &layout,
+                                    bool is_descriptor_access) {
     assert(view_state);
 
     IMAGE_STATE *image_state = GetImageState(view_state->create_info.image);
@@ -335,12 +360,35 @@ void CoreChecks::SetImageViewLayout(GLOBAL_CB_NODE *cb_node, IMAGE_VIEW_STATE *v
         sub_range.layerCount = image_state->createInfo.extent.depth;
     }
 
-    SetImageLayout(cb_node, image_state, sub_range, layout);
+    // For descriptor accesses to a single aspect of depth/stencil images, don't update the layout if the descriptor layout didn't
+    // exactly match the current layout, but was allowed by relaxed compatibility rules.
+    if (is_descriptor_access &&
+        (sub_range.aspectMask == VK_IMAGE_ASPECT_DEPTH_BIT || sub_range.aspectMask == VK_IMAGE_ASPECT_STENCIL_BIT)) {
+        for (uint32_t level_index = 0; level_index < sub_range.levelCount; ++level_index) {
+            uint32_t level = sub_range.baseMipLevel + level_index;
+            for (uint32_t layer_index = 0; layer_index < sub_range.layerCount; layer_index++) {
+                uint32_t layer = sub_range.baseArrayLayer + layer_index;
+                VkImageSubresource sub = {sub_range.aspectMask, level, layer};
+                IMAGE_CMD_BUF_LAYOUT_NODE node;
+                bool need_update = true;
+                if (FindCmdBufLayout(cb_node, image_state->image, sub, node)) {
+                    need_update = !AreDescriptorLayoutsCompatible(layout, node.layout, sub_range.aspectMask);
+                }
+                if (need_update) {
+                    VkImageSubresourceRange update_range = {sub.aspectMask, level, 1, layer, 1};
+                    SetImageLayout(cb_node, image_state, update_range, layout);
+                }
+            }
+        }
+    } else {
+        SetImageLayout(cb_node, image_state, sub_range, layout);
+    }
 }
 
-void CoreChecks::SetImageViewLayout(GLOBAL_CB_NODE *cb_node, VkImageView imageView, const VkImageLayout &layout) {
+void CoreChecks::SetImageViewLayout(GLOBAL_CB_NODE *cb_node, VkImageView imageView, const VkImageLayout &layout,
+                                    bool is_descriptor_access) {
     auto view_state = GetImageViewState(imageView);
-    SetImageViewLayout(cb_node, view_state, layout);
+    SetImageViewLayout(cb_node, view_state, layout, is_descriptor_access);
 }
 
 bool CoreChecks::ValidateRenderPassLayoutAgainstFramebufferImageUsage(RenderPassCreateVersion rp_version, VkImageLayout layout,
@@ -1092,7 +1140,8 @@ void CoreChecks::TransitionImageLayouts(GLOBAL_CB_NODE *cb_state, uint32_t memBa
 
 bool CoreChecks::VerifyImageLayout(GLOBAL_CB_NODE const *cb_node, IMAGE_STATE *image_state, VkImageSubresourceLayers subLayers,
                                    VkImageLayout explicit_layout, VkImageLayout optimal_layout, const char *caller,
-                                   const char *layout_invalid_msg_code, const char *layout_mismatch_msg_code, bool *error) {
+                                   const char *layout_invalid_msg_code, const char *layout_mismatch_msg_code, bool *error,
+                                   bool is_descriptor_access) {
     const auto image = image_state->image;
     bool skip = false;
 
@@ -1101,7 +1150,14 @@ bool CoreChecks::VerifyImageLayout(GLOBAL_CB_NODE const *cb_node, IMAGE_STATE *i
         VkImageSubresource sub = {subLayers.aspectMask, subLayers.mipLevel, layer};
         IMAGE_CMD_BUF_LAYOUT_NODE node;
         if (FindCmdBufLayout(cb_node, image, sub, node)) {
-            if (node.layout != explicit_layout) {
+            bool valid_layout;
+            if (is_descriptor_access) {
+                valid_layout = AreDescriptorLayoutsCompatible(explicit_layout, node.layout, subLayers.aspectMask);
+            } else {
+                valid_layout = node.layout == explicit_layout;
+            }
+
+            if (!valid_layout) {
                 *error = true;
                 skip |= log_msg(report_data, VK_DEBUG_REPORT_ERROR_BIT_EXT, VK_DEBUG_REPORT_OBJECT_TYPE_COMMAND_BUFFER_EXT,
                                 HandleToUint64(cb_node->commandBuffer), layout_mismatch_msg_code,

@@ -700,7 +700,8 @@ class CoreChecks : public ValidationObject {
 
     bool VerifyImageLayout(GLOBAL_CB_NODE const* cb_node, IMAGE_STATE* image_state, VkImageSubresourceLayers subLayers,
                            VkImageLayout explicit_layout, VkImageLayout optimal_layout, const char* caller,
-                           const char* layout_invalid_msg_code, const char* layout_mismatch_msg_code, bool* error);
+                           const char* layout_invalid_msg_code, const char* layout_mismatch_msg_code, bool* error,
+                           bool is_descriptor_access = false);
 
     bool CheckItgExtent(const GLOBAL_CB_NODE* cb_node, const VkExtent3D* extent, const VkOffset3D* offset,
                         const VkExtent3D* granularity, const VkExtent3D* subresource_extent, const VkImageType image_type,
@@ -754,9 +755,11 @@ class CoreChecks : public ValidationObject {
 
     void SetGlobalLayout(ImageSubresourcePair imgpair, const VkImageLayout& layout);
 
-    void SetImageViewLayout(GLOBAL_CB_NODE* pCB, VkImageView imageView, const VkImageLayout& layout);
+    void SetImageViewLayout(GLOBAL_CB_NODE* pCB, VkImageView imageView, const VkImageLayout& layout,
+                            bool is_descriptor_access = false);
 
-    void SetImageViewLayout(GLOBAL_CB_NODE* cb_node, IMAGE_VIEW_STATE* view_state, const VkImageLayout& layout);
+    void SetImageViewLayout(GLOBAL_CB_NODE* cb_node, IMAGE_VIEW_STATE* view_state, const VkImageLayout& layout,
+                            bool is_descriptor_access = false);
 
     bool VerifyFramebufferAndRenderPassLayouts(RenderPassCreateVersion rp_version, GLOBAL_CB_NODE* pCB,
                                                const VkRenderPassBeginInfo* pRenderPassBegin,
